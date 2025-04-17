@@ -1,0 +1,156 @@
+services:
+  symfony:
+    build:
+      context: ./docker/php
+      args:
+        USER_ID: ${USER_ID:-1000}
+        GROUP_ID: ${GROUP_ID:-1000}
+    user: '${USER_ID:-1000}:${GROUP_ID:-1000}'
+    environment:
+      SYMFONY_VERSION: '7.2.x' # Version spécifique ou "latest"
+      SYMFONY_TEMPLATE: 'webapp' # webapp (full-stack) ou skeleton (API)
+    volumes:
+      - .:/var/www:delegated
+    depends_on:
+      - database
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: '50m'
+        max-file: '14'
+    labels:
+      - 'traefik.enable=false' # Désactivation de l'exposition directe
+    networks:
+      - lan
+      - proxy
+
+  nginx:
+    build: ./docker/nginx
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.docker.network=proxy_net'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}.entrypoints=http'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}.rule=Host(`${COMPOSE_PROJECT_NAME}.pp.test`)'
+      - 'traefik.http.services.${COMPOSE_PROJECT_NAME}.loadbalancer.server.port=80'
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-https-redirect.redirectscheme.scheme=https'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}.middlewares=${COMPOSE_PROJECT_NAME}-https-redirect'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.entrypoints=https'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.rule=Host(`${COMPOSE_PROJECT_NAME}.pp.test`)'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.tls=true'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-secure.service=${COMPOSE_PROJECT_NAME}'
+    depends_on:
+      - symfony
+    networks:
+      - lan
+      - proxy
+
+  database:
+    image: mariadb:lts
+    restart: unless-stopped
+    environment:
+      MARIADB_USER: ${DB_USER:-app}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-app}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root}
+      MARIADB_DATABASE: ${COMPOSE_PROJECT_NAME:-app}
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: 'no'
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - database_data:/var/lib/mysql
+      - ./db.sql:/docker-entrypoint-initdb.d/db.sql
+    logging:
+      driver: 'json-file'
+      options:
+        max-size: '50m'
+        max-file: '2'
+    labels:
+      - 'traefik.enable=false'
+    networks:
+      - lan
+
+  pma:
+    image: phpmyadmin/phpmyadmin:latest
+    restart: unless-stopped
+    environment:
+      PMA_HOST: database:3306
+      PMA_ABSOLUTE_URI: https://${COMPOSE_PROJECT_NAME}.pp.test/pmasql/
+      MYSQL_ROOT_PASSWORD: 'root'
+      UPLOAD_LIMIT: 500M
+    labels:
+      - 'traefik.enable=true'
+      # Réseau et priorité
+      - 'traefik.docker.network=proxy_net'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma.priority=100'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma-secure.priority=100'
+      - 'traefik.http.services.${COMPOSE_PROJECT_NAME}-pma.loadbalancer.server.port=80'
+      # Middleware : Redirection 301 http vers https
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-pma-redirect.redirectscheme.scheme=https'
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-pma-redirect.redirectscheme.permanent=true'
+      # Middleware : Supprime le prefixe /pmasql/ avant de transmettre la demande
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-pma-stripprefix.stripprefix.prefixes=/pmasql/'
+      # Règles HTTP (redirection vers https)
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma.entrypoints=http'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma.rule=Host(`${COMPOSE_PROJECT_NAME}.pp.test`) && PathPrefix(`/pmasql/`)'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma.middlewares=${COMPOSE_PROJECT_NAME}-pma-stripprefix,${COMPOSE_PROJECT_NAME}-pma-redirect'
+      # Règles HTTPS
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma-secure.tls=true'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma-secure.entrypoints=https'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma-secure.rule=Host(`${COMPOSE_PROJECT_NAME}.pp.test`) && PathPrefix(`/pmasql/`)'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma-secure.middlewares=${COMPOSE_PROJECT_NAME}-pma-stripprefix'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-pma-secure.service=${COMPOSE_PROJECT_NAME}-pma'
+    networks:
+      - lan
+      - proxy
+
+  mailer:
+    image: axllent/mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: 5000
+      # MP_DATA_FILE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    labels:
+      - 'traefik.enable=true'
+      # Réseau et priorité
+      - 'traefik.docker.network=proxy_net'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit.priority=100'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit-secure.priority=100'
+      - 'traefik.http.services.${COMPOSE_PROJECT_NAME}-mailpit.loadbalancer.server.port=8025'
+      # Middleware : Redirection 301 http vers https
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-mailpit-redirect.redirectscheme.scheme=https'
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-mailpit-redirect.redirectscheme.permanent=true'
+      # Middleware : Supprime le prefixe /mailpit/ avant de transmettre la demande
+      - 'traefik.http.middlewares.${COMPOSE_PROJECT_NAME}-mailpit-stripprefix.stripprefix.prefixes=/mailpit/'
+      # Règles HTTP (redirection vers https)
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit.entrypoints=http'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit.rule=Host(`${COMPOSE_PROJECT_NAME}.pp.test`) && PathPrefix(`/mailpit/`)'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit.middlewares=${COMPOSE_PROJECT_NAME}-mailpit-stripprefix,${COMPOSE_PROJECT_NAME}-mailpit-redirect'
+      # Règles HTTPS
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit-secure.tls=true'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit-secure.entrypoints=https'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit-secure.rule=Host(`${COMPOSE_PROJECT_NAME}.pp.test`) && PathPrefix(`/mailpit/`)'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit-secure.middlewares=${COMPOSE_PROJECT_NAME}-mailpit-stripprefix'
+      - 'traefik.http.routers.${COMPOSE_PROJECT_NAME}-mailpit-secure.service=${COMPOSE_PROJECT_NAME}-mailpit'
+    networks:
+      - lan
+      - proxy
+
+volumes:
+  database_data:
+    name: ${COMPOSE_PROJECT_NAME}_db
+    driver: local
+  # mailpit-data:
+  #   name: ${COMPOSE_PROJECT_NAME}_mailpit
+  #   driver: local
+
+networks:
+  proxy:
+    name: proxy_net
+    external: true
+  lan:
+    driver: bridge
