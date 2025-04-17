@@ -38,7 +38,7 @@ RUN curl -sS https://get.symfony.com/cli/installer | bash && \
 	mv /root/.symfony5/bin/symfony /usr/local/bin/symfony
 
 # Script d'initialisation
-COPY docker/php/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER www-data
