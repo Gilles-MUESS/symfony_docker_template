@@ -1,48 +1,52 @@
-FROM php:8.3-fpm
+FROM php:8.4-fpm
 
-ARG USER_ID=1000
-ARG GROUP_ID=1000
-
+ARG APP_UID=1000
+ARG APP_GID=1000
+ARG APP_USER=appuser
+ARG APP_GROUP=appgroup
 ARG SYMFONY_VERSION=7.2.x
-ENV SYMFONY_ENV=dev
 
+ENV HOME=/home/${APP_USER} \
+	SYMFONY_CLI_HOME=/home/${APP_USER}/.symfony5
+
+# Dépendances système
 RUN apt-get update && apt-get install -y \
-	git \
-	unzip \
-	libzip-dev \
-	libicu-dev \
-	libpng-dev \
-	libjpeg-dev \
-	libfreetype6-dev \
-	libonig-dev \
-	&& docker-php-ext-install \
+	acl file gettext git unzip libzip-dev libicu-dev libpng-dev libjpeg-dev \
+	libfreetype6-dev libonig-dev rsync curl \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+	docker-php-ext-install \
 	pdo_mysql \
 	zip \
 	intl \
 	gd \
-	opcache
+	opcache \
+	;
 
-# Installer Composer
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+# Composer
+RUN curl -sS https://getcomposer.org/installer | php -- --2 \
+	&& mv composer.phar /usr/local/bin/composer
 
-# Configurer le user non-root
-RUN usermod -u ${USER_ID} www-data && groupmod -g ${GROUP_ID} www-data
+# Installer la Symfony CLI (en tant que root)
+COPY --from=ghcr.io/symfony-cli/symfony-cli:latest /usr/local/bin/symfony /usr/local/bin/symfony
+
+# Configuration PHP
+COPY app.ini /usr/local/etc/php/conf.d/app.ini
+
+# Créer utilisateur/groupe applicatif
+RUN groupadd -g ${APP_GID} ${APP_GROUP} \
+	&& useradd -m -u ${APP_UID} -g ${APP_GROUP} -s /bin/bash ${APP_USER}
+
+# Préparer le HOME et droits
+RUN mkdir -p /var/www && chown -R ${APP_USER}:${APP_GROUP} /var/www \
+	&& mkdir -p /home/${APP_USER}/.symfony5 && chown -R ${APP_USER}:${APP_GROUP} /home/${APP_USER}
 
 WORKDIR /var/www
 
-# Optimisations PHP pour la production
-COPY app.ini /usr/local/etc/php/conf.d/app.ini
-
-# Installation de Symfony CLI
-RUN curl -sS https://get.symfony.com/cli/installer | bash && \
-	mv /root/.symfony5/bin/symfony /usr/local/bin/symfony
-
-# Script d'initialisation
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# Entrypoint
+COPY entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-USER www-data
-
-EXPOSE 9000
-
-# RUN echo "listen = 0.0.0.0:9000" >> /usr/local/etc/php-fpm.d/zz-docker.conf
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["php-fpm"]
